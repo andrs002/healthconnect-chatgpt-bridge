@@ -9,9 +9,13 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.health.connect.client.PermissionController
 import androidx.lifecycle.lifecycleScope
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
 
@@ -21,6 +25,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var readStatus: TextView
     private lateinit var dataPreview: TextView
     private lateinit var backendStatus: TextView
+
+    private var lastRows: List<NormalizedMetric> = emptyList()
 
     private val requestPermissions =
         registerForActivityResult(
@@ -74,13 +80,17 @@ class MainActivity : ComponentActivity() {
         }
 
         backendStatus = TextView(this).apply {
-            text = "Backend: NOT CONFIGURED — no health data is being uploaded anywhere."
+            text = "Backend: Neon Data API configured; no upload attempted yet."
             textSize = 16f
         }
 
         val syncButton = Button(this).apply {
-            text = "SYNC TO BACKEND (DISABLED)"
-            isEnabled = false
+            text = "SYNC LAST 7 DAYS TO NEON"
+            setOnClickListener {
+                lifecycleScope.launch {
+                    syncNow()
+                }
+            }
         }
 
         val content = LinearLayout(this).apply {
@@ -116,6 +126,8 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             refreshPermissionStatus()
         }
+
+        schedulePeriodicSync()
     }
 
     private suspend fun refreshPermissionStatus() {
@@ -153,6 +165,7 @@ class MainActivity : ComponentActivity() {
             val start = end.minus(7, ChronoUnit.DAYS)
 
             val rows = repo.readWindow(start, end)
+            lastRows = rows
 
             if (rows.isEmpty()) {
                 readStatus.text =
@@ -210,6 +223,52 @@ class MainActivity : ComponentActivity() {
                 "Local read: FAILED — ${t.javaClass.simpleName}: ${t.message}"
             dataPreview.text = t.stackTraceToString()
         }
+    }
+
+    private suspend fun syncNow() {
+        backendStatus.text = "Backend: syncing..."
+
+        try {
+            val granted = repo.client.permissionController.getGrantedPermissions()
+            val missing = repo.permissions - granted
+
+            if (missing.isNotEmpty()) {
+                backendStatus.text =
+                    "Backend: BLOCKED — grant Health Connect permissions first."
+                return
+            }
+
+            val rows =
+                if (lastRows.isNotEmpty()) {
+                    lastRows
+                } else {
+                    val end = Instant.now()
+                    val start = end.minus(7, ChronoUnit.DAYS)
+                    repo.readWindow(start, end)
+                }
+
+            val result = NeonBackendClient(applicationContext).sync(rows)
+
+            backendStatus.text =
+                "Backend: SUCCESS — submitted ${result.submitted} record(s) to Neon. userId=${result.userId}"
+
+        } catch (t: Throwable) {
+            backendStatus.text =
+                "Backend: FAILED — ${t.javaClass.simpleName}: ${t.message}"
+        }
+    }
+
+    private fun schedulePeriodicSync() {
+        val workRequest =
+            PeriodicWorkRequestBuilder<SyncWorker>(6, TimeUnit.HOURS)
+                .build()
+
+        WorkManager.getInstance(applicationContext)
+            .enqueueUniquePeriodicWork(
+                "hcbridge-sync",
+                ExistingPeriodicWorkPolicy.UPDATE,
+                workRequest
+            )
     }
 
     private fun LinearLayout.addSpacer() {
