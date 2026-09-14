@@ -1,0 +1,41 @@
+openapi: 3.1.0
+info:
+  title: Health Connect Bridge API
+  version: 0.1.0
+paths:
+  /v1/users/{user_id}/summary:
+    get:
+      operationId: getHealthSummary
+      summary: Get the latest available health metrics for the authenticated user.
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Health summary
+  /v1/users/{user_id}/metrics:
+    get:
+      operationId: queryHealthMetrics
+      summary: Query a health metric in a date/time range.
+      parameters:
+        - in: path
+          name: user_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: metric
+          required: true
+          schema: { type: string }
+        - in: query
+          name: start
+          required: true
+          schema: { type: string, format: date-time }
+        - in: query
+          name: end
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Metric rows
