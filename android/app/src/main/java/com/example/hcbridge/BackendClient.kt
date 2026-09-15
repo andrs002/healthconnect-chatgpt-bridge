@@ -1,6 +1,7 @@
 package com.example.hcbridge
 
 import android.content.Context
+import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -15,10 +16,16 @@ data class SyncResult(
 class NeonBackendClient(
     private val context: Context
 ) {
+    // PostgREST bulk inserts require every object in the JSON array to expose
+    // the same columns. Keep nullable fields as explicit JSON null values.
+    private val gson = GsonBuilder()
+        .serializeNulls()
+        .create()
+
     private val authApi: NeonAuthApi by lazy {
         Retrofit.Builder()
             .baseUrl(AUTH_BASE_URL)
-            .addConverterFactory(GsonConverterFactory.create())
+            .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .create(NeonAuthApi::class.java)
     }
@@ -26,7 +33,7 @@ class NeonBackendClient(
     private val dataApi: NeonDataApi by lazy {
         Retrofit.Builder()
             .baseUrl(DATA_API_BASE_URL)
-            .addConverterFactory(GsonConverterFactory.create())
+            .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .create(NeonDataApi::class.java)
     }
