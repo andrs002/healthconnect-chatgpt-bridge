@@ -3,8 +3,12 @@ package com.example.hcbridge
 import android.content.Context
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
+import kotlinx.coroutines.delay
+import retrofit2.HttpException
+import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -43,7 +47,9 @@ class NeonBackendClient(
     suspend fun sync(metrics: List<NormalizedMetric>): SyncResult {
         if (metrics.isEmpty()) return SyncResult(0, userId)
 
-        val tokenResponse = authApi.anonymousToken()
+        val tokenResponse = retryTransientCall {
+            authApi.anonymousToken()
+        }
         val token = extractToken(tokenResponse)
 
         var submitted = 0
@@ -63,10 +69,12 @@ class NeonBackendClient(
                 )
             }
 
-            val response = dataApi.insertHealthRecords(
-                authorization = "Bearer $token",
-                rows = rows
-            )
+            val response = retryTransientResponse {
+                dataApi.insertHealthRecords(
+                    authorization = "Bearer $token",
+                    rows = rows
+                )
+            }
 
             if (!response.isSuccessful) {
                 val errorText = response.errorBody()?.string()
@@ -80,6 +88,60 @@ class NeonBackendClient(
 
         return SyncResult(submitted, userId)
     }
+
+    private suspend fun <T> retryTransientCall(block: suspend () -> T): T {
+        var retryDelayMs = INITIAL_RETRY_DELAY_MS
+
+        repeat(MAX_REQUEST_ATTEMPTS) { attempt ->
+            try {
+                return block()
+            } catch (t: Throwable) {
+                if (!isTransientFailure(t) || attempt == MAX_REQUEST_ATTEMPTS - 1) {
+                    throw t
+                }
+            }
+
+            delay(retryDelayMs)
+            retryDelayMs *= 2
+        }
+
+        error("Retry loop completed unexpectedly")
+    }
+
+    private suspend fun retryTransientResponse(
+        block: suspend () -> Response<Unit>
+    ): Response<Unit> {
+        var retryDelayMs = INITIAL_RETRY_DELAY_MS
+
+        repeat(MAX_REQUEST_ATTEMPTS) { attempt ->
+            try {
+                val response = block()
+                val shouldRetry = isTransientHttpStatus(response.code())
+
+                if (!shouldRetry || attempt == MAX_REQUEST_ATTEMPTS - 1) {
+                    return response
+                }
+
+                response.errorBody()?.close()
+            } catch (t: Throwable) {
+                if (!isTransientFailure(t) || attempt == MAX_REQUEST_ATTEMPTS - 1) {
+                    throw t
+                }
+            }
+
+            delay(retryDelayMs)
+            retryDelayMs *= 2
+        }
+
+        error("Retry loop completed unexpectedly")
+    }
+
+    private fun isTransientFailure(t: Throwable): Boolean =
+        t is IOException ||
+            (t is HttpException && isTransientHttpStatus(t.code()))
+
+    private fun isTransientHttpStatus(code: Int): Boolean =
+        code == 408 || code == 425 || code == 429 || code in 500..599
 
     private fun extractToken(json: JsonObject): String {
         val value = json.get("token")
@@ -125,6 +187,9 @@ class NeonBackendClient(
             "https://ep-autumn-shadow-aesref0t.apirest.c-2.us-east-2.aws.neon.tech/hcbridge/rest/v1/"
 
         const val CHUNK_SIZE = 500
+
+        private const val MAX_REQUEST_ATTEMPTS = 3
+        private const val INITIAL_RETRY_DELAY_MS = 1_000L
 
         private const val PREFS_NAME = "hcbridge_backend"
         private const val KEY_USER_ID = "local_user_id"

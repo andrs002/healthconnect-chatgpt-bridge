@@ -3,6 +3,7 @@ package com.example.hcbridge
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 
@@ -27,6 +28,8 @@ class SyncWorker(
             NeonBackendClient(applicationContext).sync(rows)
             Result.success()
 
+        } catch (t: CancellationException) {
+            throw t
         } catch (t: Throwable) {
             Result.retry()
         }
