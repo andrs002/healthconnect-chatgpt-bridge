@@ -4,11 +4,17 @@ import android.content.Context
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import kotlinx.coroutines.delay
+import okhttp3.Dns
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import okhttp3.dnsoverhttps.DnsOverHttps
 import retrofit2.HttpException
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.io.IOException
+import java.net.InetAddress
+import java.net.UnknownHostException
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -26,9 +32,12 @@ class NeonBackendClient(
         .serializeNulls()
         .create()
 
+    private val httpClient: OkHttpClient by lazy { createHttpClient() }
+
     private val authApi: NeonAuthApi by lazy {
         Retrofit.Builder()
             .baseUrl(AUTH_BASE_URL)
+            .client(httpClient)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .create(NeonAuthApi::class.java)
@@ -37,6 +46,7 @@ class NeonBackendClient(
     private val dataApi: NeonDataApi by lazy {
         Retrofit.Builder()
             .baseUrl(DATA_API_BASE_URL)
+            .client(httpClient)
             .addConverterFactory(GsonConverterFactory.create(gson))
             .build()
             .create(NeonDataApi::class.java)
@@ -143,6 +153,37 @@ class NeonBackendClient(
     private fun isTransientHttpStatus(code: Int): Boolean =
         code == 408 || code == 425 || code == 429 || code in 500..599
 
+    private fun createHttpClient(): OkHttpClient {
+        val cloudflareDns = DnsOverHttps.Builder()
+            .client(OkHttpClient())
+            .url(CLOUDFLARE_DOH_URL.toHttpUrl())
+            .bootstrapDnsHosts(
+                InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1)),
+                InetAddress.getByAddress(byteArrayOf(1, 0, 0, 1))
+            )
+            .includeIPv6(false)
+            .build()
+
+        val systemThenDohDns = object : Dns {
+            override fun lookup(hostname: String): List<InetAddress> {
+                return try {
+                    Dns.SYSTEM.lookup(hostname)
+                } catch (systemFailure: UnknownHostException) {
+                    try {
+                        cloudflareDns.lookup(hostname)
+                    } catch (dohFailure: UnknownHostException) {
+                        dohFailure.addSuppressed(systemFailure)
+                        throw dohFailure
+                    }
+                }
+            }
+        }
+
+        return OkHttpClient.Builder()
+            .dns(systemThenDohDns)
+            .build()
+    }
+
     private fun extractToken(json: JsonObject): String {
         val value = json.get("token")
         if (value != null && value.isJsonPrimitive && value.asString.isNotBlank()) {
@@ -190,6 +231,9 @@ class NeonBackendClient(
 
         private const val MAX_REQUEST_ATTEMPTS = 3
         private const val INITIAL_RETRY_DELAY_MS = 1_000L
+
+        private const val CLOUDFLARE_DOH_URL =
+            "https://cloudflare-dns.com/dns-query"
 
         private const val PREFS_NAME = "hcbridge_backend"
         private const val KEY_USER_ID = "local_user_id"
