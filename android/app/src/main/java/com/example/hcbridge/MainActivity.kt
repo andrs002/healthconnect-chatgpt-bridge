@@ -16,8 +16,12 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import kotlinx.coroutines.launch
+import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
@@ -46,7 +50,7 @@ class MainActivity : ComponentActivity() {
         repo = HealthRepository(this)
 
         val title = TextView(this).apply {
-            text = "HC Bridge — Health Connect Reader"
+            text = "HC Bridge — Health Connect Reader ${BuildConfig.VERSION_NAME}"
             textSize = 22f
         }
 
@@ -137,12 +141,15 @@ class MainActivity : ComponentActivity() {
         try {
             val granted = repo.client.permissionController.getGrantedPermissions()
             val missing = repo.permissions - granted
+            val grantedMetricCount = repo.metricPermissions.count { it in granted }
 
             permissionStatus.text =
                 if (missing.isEmpty()) {
                     "Health Connect: AUTHORIZED"
+                } else if (grantedMetricCount > 0) {
+                    "Health Connect: PARTIAL — $grantedMetricCount/${repo.metricPermissions.size} data type(s) authorized; tap GRANT to add the missing permissions."
                 } else {
-                    "Health Connect: NOT FULLY AUTHORIZED (${missing.size} permission(s) missing)"
+                    "Health Connect: NOT AUTHORIZED — tap GRANT HEALTH CONNECT ACCESS."
                 }
         } catch (t: Throwable) {
             permissionStatus.text =
@@ -156,11 +163,11 @@ class MainActivity : ComponentActivity() {
 
         try {
             val granted = repo.client.permissionController.getGrantedPermissions()
-            val missing = repo.permissions - granted
+            val grantedMetricPermissions = repo.metricPermissions.intersect(granted)
 
-            if (missing.isNotEmpty()) {
+            if (grantedMetricPermissions.isEmpty()) {
                 readStatus.text =
-                    "Local read: BLOCKED — grant Health Connect permissions first."
+                    "Local read: BLOCKED — grant at least one Health Connect data permission first."
                 return
             }
 
@@ -178,47 +185,15 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            val grouped = rows.groupBy { it.metric }
-            val summary = buildString {
-                appendLine("TOTAL RECORDS: ${rows.size}")
-                appendLine()
-
-                grouped.toSortedMap().forEach { (metric, metricRows) ->
-                    appendLine("$metric: ${metricRows.size}")
-                }
-
-                appendLine()
-                appendLine("LATEST SAMPLE RECORDS")
-                appendLine("---------------------")
-
-                rows
-                    .sortedByDescending { it.startTime }
-                    .take(25)
-                    .forEach { row ->
-                        append(row.metric)
-                        append(" | ")
-                        append(row.startTime)
-
-                        if (row.value != null) {
-                            append(" | ")
-                            append(row.value)
-                            if (!row.unit.isNullOrBlank()) {
-                                append(" ")
-                                append(row.unit)
-                            }
-                        }
-
-                        if (!row.sourcePackage.isNullOrBlank()) {
-                            append(" | source=")
-                            append(row.sourcePackage)
-                        }
-
-                        appendLine()
-                    }
-            }
+            val summary = buildHealthPreview(rows)
+            val missingMetricCount = repo.metricPermissions.size - grantedMetricPermissions.size
 
             readStatus.text =
-                "Local read: SUCCESS — ${rows.size} Health Connect record(s) read from this phone."
+                if (missingMetricCount == 0) {
+                    "Local read: SUCCESS — ${rows.size} Health Connect record(s) read from this phone."
+                } else {
+                    "Local read: PARTIAL SUCCESS — ${rows.size} record(s) read; $missingMetricCount data type permission(s) still missing."
+                }
             dataPreview.text = summary
 
         } catch (t: Throwable) {
@@ -233,11 +208,11 @@ class MainActivity : ComponentActivity() {
 
         try {
             val granted = repo.client.permissionController.getGrantedPermissions()
-            val missing = repo.permissions - granted
+            val grantedMetricPermissions = repo.metricPermissions.intersect(granted)
 
-            if (missing.isNotEmpty()) {
+            if (grantedMetricPermissions.isEmpty()) {
                 backendStatus.text =
-                    "Backend: BLOCKED — grant Health Connect permissions first."
+                    "Backend: BLOCKED — grant at least one Health Connect data permission first."
                 return
             }
 
@@ -251,9 +226,14 @@ class MainActivity : ComponentActivity() {
                 }
 
             val result = NeonBackendClient(applicationContext).sync(rows)
+            val missingMetricCount = repo.metricPermissions.size - grantedMetricPermissions.size
 
             backendStatus.text =
-                "Backend: SUCCESS — submitted ${result.submitted} record(s) to Neon. userId=${result.userId}"
+                if (missingMetricCount == 0) {
+                    "Backend: SUCCESS — submitted ${result.submitted} record(s) to Neon. userId=${result.userId}"
+                } else {
+                    "Backend: PARTIAL SUCCESS — submitted ${result.submitted} record(s); $missingMetricCount data type permission(s) missing. userId=${result.userId}"
+                }
 
         } catch (t: Throwable) {
             backendStatus.text =
@@ -284,7 +264,135 @@ class MainActivity : ComponentActivity() {
             )
     }
 
+    private fun buildHealthPreview(rows: List<NormalizedMetric>): String {
+        val grouped = rows.groupBy { it.metric }
+
+        return buildString {
+            appendLine("LATEST VALUES — ASIA/TAIPEI")
+            appendLine("---------------------------")
+            METRIC_ORDER.forEach { metric ->
+                val latest = grouped[metric]?.maxByOrNull { it.startTime }
+                append(METRIC_LABELS.getValue(metric))
+                append(": ")
+                if (latest == null) {
+                    appendLine("no record in the last 7 days")
+                } else {
+                    append(formatMetricValue(latest))
+                    append(" | ")
+                    append(formatTaipeiTime(latest.startTime))
+                    appendLine()
+                }
+            }
+
+            appendLine()
+            appendLine("RECORD COUNTS")
+            appendLine("-------------")
+            appendLine("total: ${rows.size}")
+            METRIC_ORDER.forEach { metric ->
+                appendLine("${METRIC_LABELS.getValue(metric)}: ${grouped[metric]?.size ?: 0}")
+            }
+
+            appendLine()
+            appendLine("LATEST SAMPLE RECORDS")
+            appendLine("---------------------")
+            rows.sortedByDescending { it.startTime }
+                .take(25)
+                .forEach { row ->
+                    append(METRIC_LABELS[row.metric] ?: row.metric)
+                    append(" | ")
+                    append(formatTaipeiTime(row.startTime))
+                    append(" | ")
+                    append(formatMetricValue(row))
+                    if (!row.sourcePackage.isNullOrBlank()) {
+                        append(" | source=")
+                        append(row.sourcePackage)
+                    }
+                    appendLine()
+                }
+        }
+    }
+
+    private fun formatMetricValue(row: NormalizedMetric): String {
+        if (row.metric == "blood_pressure") {
+            val systolic = (row.metadata["systolic"] as? Number)?.toDouble() ?: row.value
+            val diastolic = (row.metadata["diastolic"] as? Number)?.toDouble()
+            if (systolic != null && diastolic != null) {
+                return "${formatNumber(systolic)}/${formatNumber(diastolic)} mmHg"
+            }
+        }
+
+        if (row.metric == "sleep_session" || row.metric == "exercise_session") {
+            val minutes = durationMinutes(row)
+            if (minutes != null) {
+                return if (row.metric == "sleep_session") {
+                    "${minutes / 60}h ${minutes % 60}m"
+                } else {
+                    "$minutes min"
+                }
+            }
+        }
+
+        val value = row.value ?: return "record present"
+        return buildString {
+            append(formatNumber(value))
+            if (!row.unit.isNullOrBlank()) {
+                append(" ")
+                append(row.unit)
+            }
+        }
+    }
+
+    private fun durationMinutes(row: NormalizedMetric): Long? {
+        val metadataValue = row.metadata["durationMinutes"] as? Number
+        if (metadataValue != null) return metadataValue.toLong()
+
+        val endTime = row.endTime ?: return null
+        return runCatching {
+            Duration.between(Instant.parse(row.startTime), Instant.parse(endTime)).toMinutes()
+        }.getOrNull()
+    }
+
+    private fun formatTaipeiTime(value: String): String =
+        runCatching {
+            TAIPEI_TIME_FORMAT.format(Instant.parse(value).atZone(TAIPEI_ZONE))
+        }.getOrDefault(value)
+
+    private fun formatNumber(value: Double): String =
+        if (value % 1.0 == 0.0) {
+            value.toLong().toString()
+        } else {
+            String.format(Locale.US, "%.1f", value)
+        }
+
     private fun LinearLayout.addSpacer() {
         addView(TextView(context).apply { text = "\n" })
+    }
+
+    companion object {
+        private val TAIPEI_ZONE: ZoneId = ZoneId.of("Asia/Taipei")
+        private val TAIPEI_TIME_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+        private val METRIC_ORDER = listOf(
+            "steps",
+            "heart_rate",
+            "resting_heart_rate",
+            "blood_pressure",
+            "sleep_session",
+            "weight",
+            "body_fat",
+            "exercise_session",
+        )
+
+        private val METRIC_LABELS = mapOf(
+            "steps" to "Steps (latest interval)",
+            "heart_rate" to "Heart rate",
+            "resting_heart_rate" to "Resting heart rate",
+            "blood_pressure" to "Blood pressure",
+            "sleep_session" to "Sleep duration",
+            "weight" to "Weight",
+            "body_fat" to "Body fat",
+            "exercise_session" to "Exercise duration",
+        )
     }
 }

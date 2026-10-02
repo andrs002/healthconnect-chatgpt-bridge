@@ -1,6 +1,7 @@
 package com.example.hcbridge
 
 import android.content.Context
+import androidx.health.connect.client.permission.HealthPermission
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
@@ -17,7 +18,11 @@ class SyncWorker(
             val repo = HealthRepository(applicationContext)
             val granted = repo.client.permissionController.getGrantedPermissions()
 
-            if (!granted.containsAll(repo.permissions)) {
+            val hasBackgroundPermission =
+                HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND in granted
+            val hasAnyMetricPermission = repo.metricPermissions.any { it in granted }
+
+            if (!hasBackgroundPermission || !hasAnyMetricPermission) {
                 return Result.retry()
             }
 
