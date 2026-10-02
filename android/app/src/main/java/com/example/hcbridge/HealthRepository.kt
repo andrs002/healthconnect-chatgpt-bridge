@@ -26,20 +26,24 @@ class HealthRepository(context: Context) {
     suspend fun readWindow(start: Instant, end: Instant): List<NormalizedMetric> {
         val out = mutableListOf<NormalizedMetric>()
 
-        // For cumulative types, aggregation is preferable for user-facing totals.
-        // Raw steps are still synced here so the backend can preserve provenance.
-        readPaged(StepsRecord::class, start, end).forEach { r ->
-            out += NormalizedMetric(
-                metric = "steps",
-                startTime = r.startTime.toString(),
-                endTime = r.endTime.toString(),
-                value = r.count.toDouble(),
-                unit = "count",
-                sourcePackage = r.metadata.dataOrigin.packageName
-            )
+        // A malformed interval record in Health Connect (for example a StepsRecord
+        // whose startTime >= endTime) can make the AndroidX converter throw before
+        // it returns the page. Keep independent metric types isolated so one bad
+        // producer record does not block all health data or Neon sync.
+        safeReadPaged(StepsRecord::class, start, end).forEach { r ->
+            if (r.startTime.isBefore(r.endTime)) {
+                out += NormalizedMetric(
+                    metric = "steps",
+                    startTime = r.startTime.toString(),
+                    endTime = r.endTime.toString(),
+                    value = r.count.toDouble(),
+                    unit = "count",
+                    sourcePackage = r.metadata.dataOrigin.packageName
+                )
+            }
         }
 
-        readPaged(HeartRateRecord::class, start, end).forEach { r ->
+        safeReadPaged(HeartRateRecord::class, start, end).forEach { r ->
             r.samples.forEach { s ->
                 out += NormalizedMetric(
                     metric = "heart_rate",
@@ -51,7 +55,7 @@ class HealthRepository(context: Context) {
             }
         }
 
-        readPaged(RestingHeartRateRecord::class, start, end).forEach { r ->
+        safeReadPaged(RestingHeartRateRecord::class, start, end).forEach { r ->
             out += NormalizedMetric(
                 metric = "resting_heart_rate",
                 startTime = r.time.toString(),
@@ -61,7 +65,7 @@ class HealthRepository(context: Context) {
             )
         }
 
-        readPaged(WeightRecord::class, start, end).forEach { r ->
+        safeReadPaged(WeightRecord::class, start, end).forEach { r ->
             out += NormalizedMetric(
                 metric = "weight",
                 startTime = r.time.toString(),
@@ -71,7 +75,7 @@ class HealthRepository(context: Context) {
             )
         }
 
-        readPaged(BodyFatRecord::class, start, end).forEach { r ->
+        safeReadPaged(BodyFatRecord::class, start, end).forEach { r ->
             out += NormalizedMetric(
                 metric = "body_fat",
                 startTime = r.time.toString(),
@@ -81,31 +85,48 @@ class HealthRepository(context: Context) {
             )
         }
 
-        readPaged(SleepSessionRecord::class, start, end).forEach { r ->
-            out += NormalizedMetric(
-                metric = "sleep_session",
-                startTime = r.startTime.toString(),
-                endTime = r.endTime.toString(),
-                sourcePackage = r.metadata.dataOrigin.packageName,
-                metadata = mapOf("title" to r.title, "notes" to r.notes)
-            )
+        safeReadPaged(SleepSessionRecord::class, start, end).forEach { r ->
+            if (r.startTime.isBefore(r.endTime)) {
+                out += NormalizedMetric(
+                    metric = "sleep_session",
+                    startTime = r.startTime.toString(),
+                    endTime = r.endTime.toString(),
+                    sourcePackage = r.metadata.dataOrigin.packageName,
+                    metadata = mapOf("title" to r.title, "notes" to r.notes)
+                )
+            }
         }
 
-        readPaged(ExerciseSessionRecord::class, start, end).forEach { r ->
-            out += NormalizedMetric(
-                metric = "exercise_session",
-                startTime = r.startTime.toString(),
-                endTime = r.endTime.toString(),
-                sourcePackage = r.metadata.dataOrigin.packageName,
-                metadata = mapOf(
-                    "exerciseType" to r.exerciseType,
-                    "title" to r.title,
-                    "notes" to r.notes
+        safeReadPaged(ExerciseSessionRecord::class, start, end).forEach { r ->
+            if (r.startTime.isBefore(r.endTime)) {
+                out += NormalizedMetric(
+                    metric = "exercise_session",
+                    startTime = r.startTime.toString(),
+                    endTime = r.endTime.toString(),
+                    sourcePackage = r.metadata.dataOrigin.packageName,
+                    metadata = mapOf(
+                        "exerciseType" to r.exerciseType,
+                        "title" to r.title,
+                        "notes" to r.notes
+                    )
                 )
-            )
+            }
         }
 
         return out
+    }
+
+    private suspend fun <T : Record> safeReadPaged(
+        klass: kotlin.reflect.KClass<T>,
+        start: Instant,
+        end: Instant
+    ): List<T> = try {
+        readPaged(klass, start, end)
+    } catch (e: IllegalArgumentException) {
+        // AndroidX Health Connect can fail an entire page while converting one
+        // malformed platform interval record. Skip only this metric type so the
+        // remaining valid health metrics can still be read and synchronized.
+        emptyList()
     }
 
     private suspend fun <T : Record> readPaged(
