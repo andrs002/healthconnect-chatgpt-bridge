@@ -50,7 +50,7 @@ class MainActivity : ComponentActivity() {
         repo = HealthRepository(this)
 
         val title = TextView(this).apply {
-            text = "HC Bridge — Health Connect Reader ${BuildConfig.VERSION_NAME}"
+            text = "HC Bridge — Health Connect Reader 1.0.12"
             textSize = 22f
         }
 
