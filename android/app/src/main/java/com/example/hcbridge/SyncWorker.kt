@@ -5,8 +5,6 @@ import androidx.health.connect.client.permission.HealthPermission
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CancellationException
-import java.time.Instant
-import java.time.temporal.ChronoUnit
 
 class SyncWorker(
     appContext: Context,
@@ -23,14 +21,10 @@ class SyncWorker(
             val hasAnyMetricPermission = repo.metricPermissions.any { it in granted }
 
             if (!hasBackgroundPermission || !hasAnyMetricPermission) {
-                return Result.retry()
+                return Result.success()
             }
 
-            val end = Instant.now()
-            val start = end.minus(1, ChronoUnit.DAYS)
-            val rows = repo.readWindow(start, end)
-
-            NeonBackendClient(applicationContext).sync(rows)
+            HealthSync(applicationContext, repo).syncChanges()
             Result.success()
 
         } catch (t: CancellationException) {

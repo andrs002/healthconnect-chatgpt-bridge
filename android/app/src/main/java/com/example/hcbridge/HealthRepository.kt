@@ -21,16 +21,18 @@ import kotlin.reflect.KClass
 class HealthRepository(context: Context) {
     val client: HealthConnectClient = HealthConnectClient.getOrCreate(context)
 
-    val metricPermissions: Set<String> = linkedSetOf(
-        HealthPermission.getReadPermission(StepsRecord::class),
-        HealthPermission.getReadPermission(HeartRateRecord::class),
-        HealthPermission.getReadPermission(RestingHeartRateRecord::class),
-        HealthPermission.getReadPermission(SleepSessionRecord::class),
-        HealthPermission.getReadPermission(WeightRecord::class),
-        HealthPermission.getReadPermission(BodyFatRecord::class),
-        HealthPermission.getReadPermission(ExerciseSessionRecord::class),
-        HealthPermission.getReadPermission(BloodPressureRecord::class),
+    internal val recordTypes: Set<KClass<out Record>> = linkedSetOf(
+        StepsRecord::class,
+        HeartRateRecord::class,
+        RestingHeartRateRecord::class,
+        SleepSessionRecord::class,
+        WeightRecord::class,
+        BodyFatRecord::class,
+        ExerciseSessionRecord::class,
+        BloodPressureRecord::class,
     )
+
+    val metricPermissions: Set<String> = recordTypes.map { HealthPermission.getReadPermission(it) }.toSet()
 
     val permissions: Set<String> = metricPermissions + setOf(
         HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY,
@@ -40,113 +42,129 @@ class HealthRepository(context: Context) {
     suspend fun readWindow(start: Instant, end: Instant): List<NormalizedMetric> {
         val out = mutableListOf<NormalizedMetric>()
 
-        recoverReadPaged(StepsRecord::class, start, end).forEach { record ->
-            if (record.startTime.isBefore(record.endTime)) {
-                out += NormalizedMetric(
-                    metric = "steps",
-                    startTime = record.startTime.toString(),
-                    endTime = record.endTime.toString(),
-                    value = record.count.toDouble(),
-                    unit = "count",
-                    sourcePackage = record.metadata.dataOrigin.packageName,
-                )
-            }
+        for (recordType in recordTypes) {
+            recoverReadPaged(recordType, start, end).forEach { addRecord(it, out) }
         }
 
-        recoverReadPaged(HeartRateRecord::class, start, end).forEach { record ->
-            record.samples.forEach { sample ->
+        return out
+    }
+
+    internal fun normalizeRecords(records: Iterable<Record>): List<NormalizedMetric> {
+        val out = mutableListOf<NormalizedMetric>()
+        records.forEach { addRecord(it, out) }
+        return out
+    }
+
+    private fun addRecord(record: Record, out: MutableList<NormalizedMetric>) {
+        when (record) {
+            is StepsRecord -> {
+                if (record.startTime.isBefore(record.endTime)) {
+                    out += NormalizedMetric(
+                        metric = "steps",
+                        startTime = record.startTime.toString(),
+                        endTime = record.endTime.toString(),
+                        value = record.count.toDouble(),
+                        unit = "count",
+                        sourcePackage = record.metadata.dataOrigin.packageName,
+                    )
+                }
+            }
+
+            is HeartRateRecord -> {
+                record.samples.forEach { sample ->
+                    out += NormalizedMetric(
+                        metric = "heart_rate",
+                        startTime = sample.time.toString(),
+                        value = sample.beatsPerMinute.toDouble(),
+                        unit = "bpm",
+                        sourcePackage = record.metadata.dataOrigin.packageName,
+                    )
+                }
+            }
+
+            is RestingHeartRateRecord -> {
                 out += NormalizedMetric(
-                    metric = "heart_rate",
-                    startTime = sample.time.toString(),
-                    value = sample.beatsPerMinute.toDouble(),
+                    metric = "resting_heart_rate",
+                    startTime = record.time.toString(),
+                    value = record.beatsPerMinute.toDouble(),
                     unit = "bpm",
                     sourcePackage = record.metadata.dataOrigin.packageName,
                 )
             }
-        }
 
-        recoverReadPaged(RestingHeartRateRecord::class, start, end).forEach { record ->
-            out += NormalizedMetric(
-                metric = "resting_heart_rate",
-                startTime = record.time.toString(),
-                value = record.beatsPerMinute.toDouble(),
-                unit = "bpm",
-                sourcePackage = record.metadata.dataOrigin.packageName,
-            )
-        }
-
-        recoverReadPaged(WeightRecord::class, start, end).forEach { record ->
-            out += NormalizedMetric(
-                metric = "weight",
-                startTime = record.time.toString(),
-                value = record.weight.inKilograms,
-                unit = "kg",
-                sourcePackage = record.metadata.dataOrigin.packageName,
-            )
-        }
-
-        recoverReadPaged(BodyFatRecord::class, start, end).forEach { record ->
-            out += NormalizedMetric(
-                metric = "body_fat",
-                startTime = record.time.toString(),
-                value = record.percentage.value,
-                unit = "percent",
-                sourcePackage = record.metadata.dataOrigin.packageName,
-            )
-        }
-
-        recoverReadPaged(BloodPressureRecord::class, start, end).forEach { record ->
-            val systolic = record.systolic.inMillimetersOfMercury
-            val diastolic = record.diastolic.inMillimetersOfMercury
-            out += NormalizedMetric(
-                metric = "blood_pressure",
-                startTime = record.time.toString(),
-                value = systolic,
-                unit = "mmHg",
-                sourcePackage = record.metadata.dataOrigin.packageName,
-                metadata = mapOf(
-                    "systolic" to systolic,
-                    "diastolic" to diastolic,
-                    "bodyPosition" to record.bodyPosition,
-                    "measurementLocation" to record.measurementLocation,
-                ),
-            )
-        }
-
-        recoverReadPaged(SleepSessionRecord::class, start, end).forEach { record ->
-            if (record.startTime.isBefore(record.endTime)) {
+            is WeightRecord -> {
                 out += NormalizedMetric(
-                    metric = "sleep_session",
-                    startTime = record.startTime.toString(),
-                    endTime = record.endTime.toString(),
+                    metric = "weight",
+                    startTime = record.time.toString(),
+                    value = record.weight.inKilograms,
+                    unit = "kg",
+                    sourcePackage = record.metadata.dataOrigin.packageName,
+                )
+            }
+
+            is BodyFatRecord -> {
+                out += NormalizedMetric(
+                    metric = "body_fat",
+                    startTime = record.time.toString(),
+                    value = record.percentage.value,
+                    unit = "percent",
+                    sourcePackage = record.metadata.dataOrigin.packageName,
+                )
+            }
+
+            is BloodPressureRecord -> {
+                val systolic = record.systolic.inMillimetersOfMercury
+                val diastolic = record.diastolic.inMillimetersOfMercury
+                out += NormalizedMetric(
+                    metric = "blood_pressure",
+                    startTime = record.time.toString(),
+                    value = systolic,
+                    unit = "mmHg",
                     sourcePackage = record.metadata.dataOrigin.packageName,
                     metadata = mapOf(
-                        "durationMinutes" to Duration.between(record.startTime, record.endTime).toMinutes(),
-                        "title" to record.title,
-                        "notes" to record.notes,
+                        "systolic" to systolic,
+                        "diastolic" to diastolic,
+                        "bodyPosition" to record.bodyPosition,
+                        "measurementLocation" to record.measurementLocation,
                     ),
                 )
             }
-        }
 
-        recoverReadPaged(ExerciseSessionRecord::class, start, end).forEach { record ->
-            if (record.startTime.isBefore(record.endTime)) {
-                out += NormalizedMetric(
-                    metric = "exercise_session",
-                    startTime = record.startTime.toString(),
-                    endTime = record.endTime.toString(),
-                    sourcePackage = record.metadata.dataOrigin.packageName,
-                    metadata = mapOf(
-                        "durationMinutes" to Duration.between(record.startTime, record.endTime).toMinutes(),
-                        "exerciseType" to record.exerciseType,
-                        "title" to record.title,
-                        "notes" to record.notes,
-                    ),
-                )
+            is SleepSessionRecord -> {
+                if (record.startTime.isBefore(record.endTime)) {
+                    out += NormalizedMetric(
+                        metric = "sleep_session",
+                        startTime = record.startTime.toString(),
+                        endTime = record.endTime.toString(),
+                        sourcePackage = record.metadata.dataOrigin.packageName,
+                        metadata = mapOf(
+                            "durationMinutes" to Duration.between(record.startTime, record.endTime).toMinutes(),
+                            "title" to record.title,
+                            "notes" to record.notes,
+                        ),
+                    )
+                }
             }
-        }
 
-        return out
+            is ExerciseSessionRecord -> {
+                if (record.startTime.isBefore(record.endTime)) {
+                    out += NormalizedMetric(
+                        metric = "exercise_session",
+                        startTime = record.startTime.toString(),
+                        endTime = record.endTime.toString(),
+                        sourcePackage = record.metadata.dataOrigin.packageName,
+                        metadata = mapOf(
+                            "durationMinutes" to Duration.between(record.startTime, record.endTime).toMinutes(),
+                            "exerciseType" to record.exerciseType,
+                            "title" to record.title,
+                            "notes" to record.notes,
+                        ),
+                    )
+                }
+            }
+
+            else -> Unit
+        }
     }
 
     private suspend fun <T : Record> recoverReadPaged(

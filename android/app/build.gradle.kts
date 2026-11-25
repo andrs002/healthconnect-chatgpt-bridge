@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.hcbridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 41
-        versionName = "1.0.12"
+        versionCode = 42
+        versionName = "1.0.13"
     }
 
     compileOptions {

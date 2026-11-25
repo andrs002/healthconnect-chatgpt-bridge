@@ -15,6 +15,8 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.time.Duration
 import java.time.Instant
@@ -27,13 +29,14 @@ import java.util.concurrent.TimeUnit
 class MainActivity : ComponentActivity() {
 
     private lateinit var repo: HealthRepository
+    private lateinit var healthSync: HealthSync
 
     private lateinit var permissionStatus: TextView
     private lateinit var readStatus: TextView
     private lateinit var dataPreview: TextView
     private lateinit var backendStatus: TextView
 
-    private var lastRows: List<NormalizedMetric> = emptyList()
+    private var syncJob: Job? = null
 
     private val requestPermissions =
         registerForActivityResult(
@@ -48,9 +51,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         repo = HealthRepository(this)
+        healthSync = HealthSync(applicationContext, repo)
 
         val title = TextView(this).apply {
-            text = "HC Bridge — Health Connect Reader 1.0.12"
+            text = "HC Bridge — Health Connect Reader 1.0.13"
             textSize = 22f
         }
 
@@ -94,8 +98,14 @@ class MainActivity : ComponentActivity() {
         val syncButton = Button(this).apply {
             text = "SYNC LAST 7 DAYS TO NEON"
             setOnClickListener {
-                lifecycleScope.launch {
-                    syncNow()
+                syncJob?.cancel()
+                syncJob = lifecycleScope.launch {
+                    isEnabled = false
+                    try {
+                        syncNow()
+                    } finally {
+                        isEnabled = true
+                    }
                 }
             }
         }
@@ -137,6 +147,27 @@ class MainActivity : ComponentActivity() {
         schedulePeriodicSync()
     }
 
+    override fun onResume() {
+        super.onResume()
+
+        if (syncJob?.isActive == true) return
+        syncJob = lifecycleScope.launch {
+            try {
+                val granted = repo.client.permissionController.getGrantedPermissions()
+                if (repo.metricPermissions.none { it in granted }) return@launch
+
+                backendStatus.text = "Backend: checking for new records..."
+                healthSync.syncChanges()
+                backendStatus.text = "Backend: up to date with Health Connect."
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Exception) {
+                backendStatus.text =
+                    "Backend: FAILED — ${t.javaClass.simpleName}: ${t.message}"
+            }
+        }
+    }
+
     private suspend fun refreshPermissionStatus() {
         try {
             val granted = repo.client.permissionController.getGrantedPermissions()
@@ -175,7 +206,6 @@ class MainActivity : ComponentActivity() {
             val start = end.minus(7, ChronoUnit.DAYS)
 
             val rows = repo.readWindow(start, end)
-            lastRows = rows
 
             if (rows.isEmpty()) {
                 readStatus.text =
@@ -216,16 +246,7 @@ class MainActivity : ComponentActivity() {
                 return
             }
 
-            val rows =
-                if (lastRows.isNotEmpty()) {
-                    lastRows
-                } else {
-                    val end = Instant.now()
-                    val start = end.minus(7, ChronoUnit.DAYS)
-                    repo.readWindow(start, end)
-                }
-
-            val result = NeonBackendClient(applicationContext).sync(rows)
+            val result = healthSync.syncRecentHistory()
             val missingMetricCount = repo.metricPermissions.size - grantedMetricPermissions.size
 
             backendStatus.text =
@@ -235,7 +256,9 @@ class MainActivity : ComponentActivity() {
                     "Backend: PARTIAL SUCCESS — submitted ${result.submitted} record(s); $missingMetricCount data type permission(s) missing. userId=${result.userId}"
                 }
 
-        } catch (t: Throwable) {
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Exception) {
             backendStatus.text =
                 "Backend: FAILED — ${t.javaClass.simpleName}: ${t.message}"
         }
@@ -247,7 +270,7 @@ class MainActivity : ComponentActivity() {
             .build()
 
         val workRequest =
-            PeriodicWorkRequestBuilder<SyncWorker>(6, TimeUnit.HOURS)
+            PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(constraints)
                 .setBackoffCriteria(
                     BackoffPolicy.EXPONENTIAL,
